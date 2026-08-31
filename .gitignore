@@ -1,0 +1,12 @@
+# build outputs
+cpu_fufft
+cpu_inplace
+cpu_mixed
+verify_kernel
+bench_cpp_naive
+bench_cpp_opt
+bench_ptx
+bench_dx
+*.log
+__pycache__/
+.DS_Store

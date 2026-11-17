@@ -1,0 +1,71 @@
+name: CUDA tests (simulated H100)
+
+# Optional, non-required check. The hosted runners have no GPU, so this builds
+# the three device backends and runs the bench's built-in correctness check
+# (fuFFT vs the cuFFT chain) on a simulated NVIDIA H100
+# (https://github.com/pantheongpu/pantheonsim). A simulator cannot reproduce
+# hardware-specific behaviour or timing, so it complements real-GPU testing
+# and does not replace it. The bench is run with ITERS=0, which does one launch
+# per kernel and skips the timing loops.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "*.cu"
+      - "*.cuh"
+      - "Makefile"
+      - ".github/workflows/gpu-sim.yml"
+
+concurrency:
+  group: gpu-sim-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  cuda-sim:
+    name: CUDA 13.0, simulated H100
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up the simulated GPU and CUDA toolkit
+        uses: pantheongpu/setup-pantheonsim@a1b9d4237411f9b2b0e0bb895b4d83377f336a7b # v0.1.9
+        with:
+          gpu: nvidia/h100
+          cuda-toolkit: "13.0"
+          library-path: "false"
+
+      # SM=90 embeds compute_90 PTX next to the SASS, which is what the
+      # simulator runs; -cudart shared is required by the simulator.
+      - name: Build the cpp_naive, cpp_opt and ptx backends
+        run: |
+          make -j3 gpu SM=90 CUDA=/usr/local/cuda-13.0 \
+            NVFLAGS="-O3 -std=c++17 -lineinfo --ptxas-options=-v -cudart shared"
+
+      # Each backend must really run on the simulated device: the exit code
+      # has to be 0, the virtual GPU has to be reported, and every "rel L2"
+      # line (3 for each of 4 sizes, plus 1 for each of 2 large sizes) has to be
+      # present and below 1e-3. A missing or NaN value fails the step.
+      - name: Run the bench correctness checks (ITERS=0)
+        run: |
+          set -o pipefail
+          for b in cpp_naive cpp_opt ptx; do
+            echo "##### backend $b"
+            vgpu run ./bench_$b 0 2>&1 | tee run_$b.log
+            grep -q 'virtual GPU platform initialized' run_$b.log
+            grep -q "^backend: " run_$b.log
+            grep -q '^larger N via the four-step path' run_$b.log
+            test "$(grep -c 'rel L2' run_$b.log)" -eq 14
+            grep 'rel L2' run_$b.log | awk '
+              { v = ""
+                for (i = 1; i <= NF; i++) if ($i ~ /^[0-9.]+e[-+][0-9]+$/) { v = $i; break }
+                if (v == "" || !(v + 0 < 1e-3)) { print "BAD rel L2: " $0; bad = 1 } }
+              END { exit bad }'
+          done
